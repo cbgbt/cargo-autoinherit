@@ -2,7 +2,7 @@ use crate::dedup::MinimalVersionSet;
 use anyhow::Context;
 use cargo_manifest::{Dependency, DependencyDetail, DepsSet, Manifest};
 use guppy::VersionReq;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Formatter;
 use toml_edit::{Array, Key};
 
@@ -239,15 +239,29 @@ fn inherit_deps(
 ) {
     for (name, dep) in deps {
         let package_name = dep.package().unwrap_or(name.as_str());
-        if !package_name2spec.contains_key(package_name) {
+        let package_spec = if let Some(package_spec) = package_name2spec.get(package_name) {
+            package_spec
+        } else {
             continue;
-        }
+        };
+
         match dep {
             Dependency::Simple(_) => {
                 let mut inherited = toml_edit::InlineTable::new();
                 inherited.insert("workspace", toml_edit::value(true).into_value().unwrap());
-                inherited.set_dotted(prefer_simple_dotted);
 
+                // Simple dependencies always have default features enabled
+                // So we should explicitly re-enable here.
+                if !package_spec.default_features {
+                    inherited.insert(
+                        "features",
+                        toml_edit::Value::Array(Array::from_iter(&["default".to_string()])),
+                    );
+                }
+
+                if inherited.len() == 1 {
+                    inherited.set_dotted(prefer_simple_dotted);
+                }
                 insert_preserving_decor(toml_deps, name, toml_edit::Item::Value(inherited.into()));
                 *was_modified = true;
             }
@@ -257,12 +271,36 @@ fn inherit_deps(
             Dependency::Detailed(details) => {
                 let mut inherited = toml_edit::InlineTable::new();
                 inherited.insert("workspace", toml_edit::value(true).into_value().unwrap());
-                if let Some(features) = &details.features {
+
+                // Build features
+                // Add "default" to features list if necessary
+                let mut features = BTreeSet::new();
+                let should_have_defaults =
+                    !package_spec.default_features && details.default_features != Some(false);
+                let has_defaults = details
+                    .features
+                    .as_ref()
+                    .map(|f| f.contains(&"default".to_string()))
+                    .unwrap_or(false);
+                if should_have_defaults && !has_defaults {
+                    features.insert("default".to_string());
+                }
+
+                if let Some(current_features) = &details.features {
+                    current_features.iter().for_each(|f| {
+                        if !features.contains(f) {
+                            features.insert(f.to_string());
+                        }
+                    });
+                }
+
+                if !features.is_empty() {
                     inherited.insert(
                         "features",
-                        toml_edit::Value::Array(Array::from_iter(features.iter())),
+                        toml_edit::Value::Array(Array::from_iter(features.into_iter())),
                     );
                 }
+
                 if let Some(optional) = details.optional {
                     inherited.insert("optional", toml_edit::value(optional).into_value().unwrap());
                 }
