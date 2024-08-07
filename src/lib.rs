@@ -8,6 +8,12 @@ use toml_edit::{Array, Key};
 
 mod dedup;
 
+#[derive(Debug, Default, Clone)]
+pub struct AutoInheritConf {
+    /// Represents inherited dependencies as `package.workspace = true` if possible.
+    pub prefer_simple_dotted: bool,
+}
+
 /// Rewrites a `path` dependency as being absolute, based on a given path
 fn rewrite_dep_paths_as_absolute<'a, P: AsRef<std::path::Path>>(
     deps: impl Iterator<Item = &'a mut Dependency>,
@@ -40,7 +46,7 @@ fn rewrite_dep_path_as_relative<P: AsRef<std::path::Path>>(dep: &mut Dependency,
     }
 }
 
-pub fn auto_inherit() -> Result<(), anyhow::Error> {
+pub fn auto_inherit(conf: &AutoInheritConf) -> Result<(), anyhow::Error> {
     let metadata = guppy::MetadataCommand::new().exec().context(
         "Failed to execute `cargo metadata`. Was the command invoked inside a Rust project?",
     )?;
@@ -174,6 +180,7 @@ pub fn auto_inherit() -> Result<(), anyhow::Error> {
                 deps_toml,
                 &package_name2inherited_source,
                 &mut was_modified,
+                conf.prefer_simple_dotted,
             );
         }
         if let Some(deps) = &manifest.dev_dependencies {
@@ -185,6 +192,7 @@ pub fn auto_inherit() -> Result<(), anyhow::Error> {
                 deps_toml,
                 &package_name2inherited_source,
                 &mut was_modified,
+                conf.prefer_simple_dotted,
             );
         }
         if let Some(deps) = &manifest.build_dependencies {
@@ -196,6 +204,7 @@ pub fn auto_inherit() -> Result<(), anyhow::Error> {
                 deps_toml,
                 &package_name2inherited_source,
                 &mut was_modified,
+                conf.prefer_simple_dotted,
             );
         }
         if was_modified {
@@ -226,6 +235,7 @@ fn inherit_deps(
     toml_deps: &mut toml_edit::Table,
     package_name2spec: &BTreeMap<String, SharedDependency>,
     was_modified: &mut bool,
+    prefer_simple_dotted: bool,
 ) {
     for (name, dep) in deps {
         let package_name = dep.package().unwrap_or(name.as_str());
@@ -236,6 +246,7 @@ fn inherit_deps(
             Dependency::Simple(_) => {
                 let mut inherited = toml_edit::InlineTable::new();
                 inherited.insert("workspace", toml_edit::value(true).into_value().unwrap());
+                inherited.set_dotted(prefer_simple_dotted);
 
                 insert_preserving_decor(toml_deps, name, toml_edit::Item::Value(inherited.into()));
                 *was_modified = true;
@@ -254,6 +265,10 @@ fn inherit_deps(
                 }
                 if let Some(optional) = details.optional {
                     inherited.insert("optional", toml_edit::value(optional).into_value().unwrap());
+                }
+
+                if inherited.len() == 1 {
+                    inherited.set_dotted(prefer_simple_dotted);
                 }
 
                 insert_preserving_decor(toml_deps, name, toml_edit::Item::Value(inherited.into()));
